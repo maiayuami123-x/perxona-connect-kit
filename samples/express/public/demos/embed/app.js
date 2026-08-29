@@ -23,7 +23,7 @@ const chatPanel = document.getElementById("chat");
 /** @type {{role: "user"|"assistant", text: string}[]} */
 const history = [];
 const MAX_HISTORY_TURNS = 20; // 10 user + 10 assistant
-const GREETING = "Hi! Ask me anything about XRSPACE.";
+const GREETING = "哈囉,我是小菇。跟我說你今天吃了什麼,我幫你算熱量、給建議。";
 const FAILURE_REPLY = "Sorry — I couldn't reach the assistant just then.";
 // Shown in #stage-error when start() rejects, whatever the cause — the
 // actual reason (bad config, unreachable presenter engine, no chatbot yet)
