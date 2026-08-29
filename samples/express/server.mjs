@@ -1186,6 +1186,61 @@ app.post(
     );
   }),
 );
+// ── Kid profile ────────────────────────────────────────────────────────────
+// A third chatbot, for one child. Separate from both the public demo and the
+// family one: its own chatbot, its own avatar and voice, so nothing here can
+// be reached from the other two pages by changing a URL.
+//
+// KID_AVATAR_ID / KID_SCENE_ID / KID_VOICE_ID are optional — leave any of them
+// unset and that page falls back to whatever /api/config resolved for the
+// public demo. Voice is the one worth setting: a child talks to a child voice.
+//
+// Same caveat as /api/family/chat: no gate. Anyone who finds the URL can talk
+// to it. Nothing here holds medical data, but it is a child's account, so add
+// a passcode before this URL leaves the family.
+const KID_CHATBOT_ID = process.env.KID_CHATBOT_ID ?? "";
+const KID_TARGET = {
+  avatarId: process.env.KID_AVATAR_ID || undefined,
+  sceneId: process.env.KID_SCENE_ID || undefined,
+  voiceId: process.env.KID_VOICE_ID || undefined,
+};
+
+// GET /api/kid/config → { fixedTarget } — the avatar/scene/voice this page
+// should run, with anything unset inherited from the shared configuration.
+app.get(
+  "/api/kid/config",
+  route(async (_req, res) => {
+    const { target } = await resolveEmbedConfig();
+    // A target needs avatar AND scene together; voice may be pinned alone.
+    const merged = {
+      ...(target ?? {}),
+      ...(KID_TARGET.avatarId && KID_TARGET.sceneId
+        ? { avatarId: KID_TARGET.avatarId, sceneId: KID_TARGET.sceneId }
+        : {}),
+      ...(KID_TARGET.voiceId ? { voiceId: KID_TARGET.voiceId } : {}),
+    };
+    res.json({ fixedTarget: merged.avatarId ? merged : null });
+  }),
+);
+
+app.post(
+  "/api/kid/chat",
+  route(async (req, res) => {
+    if (!KID_CHATBOT_ID) {
+      res.status(501).json({ error: "KID_CHATBOT_ID not configured" });
+      return;
+    }
+    const messages = req.body?.messages;
+    const invalid = chatPayloadError(messages);
+    if (invalid) {
+      res.status(400).json({ error: invalid });
+      return;
+    }
+    res.json(
+      await api.chatWithChatbot(KID_CHATBOT_ID, messages, CONNECT_SECRET_KEY),
+    );
+  }),
+);
 
 // ── Start ──────────────────────────────────────────────────────────────────
 
