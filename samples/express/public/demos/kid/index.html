@@ -1,0 +1,249 @@
+<!doctype html>
+<html lang="zh-Hant">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta name="robots" content="noindex, nofollow" />
+    <title>大福</title>
+    <style>
+      /* Built for one 75-year-old on a phone. Every choice here trades
+         density for legibility: nothing smaller than 18px, nothing to tap
+         under 56px, no icon that isn't also a word. */
+      :root {
+        --bg: #15161f;
+        --panel: #1d1f2a;
+        --line: #333747;
+        --text: #f2f3f8;
+        --dim: #a9adbe;
+        --accent: #e08a3c;
+        --accent-press: #c4742c;
+        --user: #4a5a8c;
+      }
+      * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+      html, body { height: 100%; }
+      body {
+        margin: 0; background: var(--bg); color: var(--text);
+        font-family: "PingFang TC", "Noto Sans CJK TC", "Microsoft JhengHei", sans-serif;
+        font-size: 19px; line-height: 1.7;
+        display: flex; flex-direction: column;
+        padding-bottom: env(safe-area-inset-bottom);
+      }
+
+
+      /* ── avatar ── */
+      #stage { position: relative; width: 100%; aspect-ratio: 1 / 1; background: #0b0c11; flex: none; }
+      sv-presenter { display: block; width: 100%; height: 100%; }
+      #loading, #stage-error {
+        position: absolute; inset: 0; display: flex; align-items: center;
+        justify-content: center; color: var(--dim); font-size: 18px; padding: 24px;
+        text-align: center;
+      }
+
+      /* ── conversation ── */
+      #log {
+        flex: 1; overflow-y: auto; list-style: none;
+        margin: 0; padding: 16px 14px 8px;
+        display: flex; flex-direction: column; gap: 12px;
+        -webkit-overflow-scrolling: touch;
+      }
+      #log li {
+        max-width: 88%; padding: 14px 17px; border-radius: 18px;
+        background: var(--panel); word-wrap: break-word;
+      }
+      #log li.me { align-self: flex-end; background: var(--user); }
+      #log li.err { background: #4a2b2b; }
+
+      /* ── controls ── */
+      form {
+        display: flex; gap: 10px; padding: 12px 12px 16px;
+        border-top: 1px solid var(--line); background: var(--bg); align-items: center;
+      }
+      .cam {
+        flex: none; width: 64px; height: 64px; border-radius: 16px;
+        background: var(--panel); border: 2px solid var(--line);
+        display: flex; flex-direction: column; align-items: center;
+        justify-content: center; gap: 1px; font-size: 22px; line-height: 1;
+      }
+      .cam span.t { font-size: 12px; color: var(--dim); }
+      .cam input { position: absolute; width: 1px; height: 1px; opacity: 0; }
+      #msg {
+        flex: 1; min-width: 0; height: 64px; font-size: 19px;
+        border-radius: 16px; border: 2px solid var(--line);
+        background: var(--panel); color: var(--text); padding: 0 16px;
+      }
+      #msg::placeholder { color: #767b8e; }
+      #send {
+        flex: none; width: 78px; height: 64px; border: none; border-radius: 16px;
+        background: var(--accent); color: #fff; font-size: 20px; font-weight: 600;
+      }
+      #send:active { background: var(--accent-press); }
+      button:disabled, .cam.off { opacity: 0.45; }
+      .foot { text-align: center; color: #6b7082; font-size: 14px; padding: 0 16px 10px; }
+    </style>
+  </head>
+  <body>
+    <div id="stage">
+      <sv-presenter></sv-presenter>
+      <div id="loading">小菇準備中,請稍等一下…</div>
+      <div id="stage-error" hidden></div>
+    </div>
+
+    <ul id="log"></ul>
+
+    <form id="form">
+      <label class="cam" id="cam" title="拍照">
+        <span aria-hidden="true">📷</span><span class="t">拍照</span>
+        <input id="photo" type="file" accept="image/*" capture="environment" aria-label="拍食物照片" />
+      </label>
+      <input id="msg" type="text" autocomplete="off" placeholder="今天吃了什麼?" aria-label="訊息" />
+      <button id="send" type="submit">送出</button>
+    </form>
+    <div class="foot">有身體不舒服要跟大人說喔</div>
+
+    <script type="module">
+      const $ = (id) => document.getElementById(id);
+      const presenter = document.querySelector("sv-presenter");
+      const log = $("log"), form = $("form"), msg = $("msg"),
+            send = $("send"), photo = $("photo"), cam = $("cam");
+
+      const GREETING = "叡叡!今天吃了什麼?跟我說說看。";
+      const FAIL = "啊,我剛剛恍神了,再說一次?";
+      const PHOTO_FAIL = "這張我看不出來耶,你直接跟我說吃什麼好了。";
+      const NO_FOOD = "沒有看到食物";
+
+      let history = [], audioOn = false, config = null;
+
+      function say(text, cls) {
+        const li = document.createElement("li");
+        if (cls) li.className = cls;
+        li.textContent = text;
+        log.append(li);
+        log.scrollTop = log.scrollHeight;
+        return li;
+      }
+      function busy(on) {
+        send.disabled = on; msg.disabled = on;
+        photo.disabled = on; cam.classList.toggle("off", on);
+      }
+
+      // ── conversation ────────────────────────────────────────────────────
+      async function unlockAudio() {
+        if (audioOn) return;
+        await presenter.resumeAudioPlayback?.();
+        audioOn = true;
+      }
+
+      async function ask(text, shown = text) {
+        say(shown, "me");
+        history.push({ role: "user", text });
+        busy(true);
+        presenter.setThinking?.(true);
+        try {
+          await unlockAudio();
+          const res = await fetch("/api/kid/chat", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              messages: history.slice(-20).map(({ role, text }) => ({
+                role, parts: [{ type: "text", text }],
+              })),
+            }),
+          });
+          const data = await res.json().catch(() => ({}));
+          const reply = data.reply_text;
+          if (!res.ok || !reply) throw new Error(data.error ?? res.statusText);
+          say(reply);
+          history.push({ role: "assistant", text: reply });
+          presenter.setThinking?.(false);
+          await presenter.present(reply);
+        } catch (err) {
+          if (history.at(-1)?.role === "user") history.pop();
+          presenter.setThinking?.(false);
+          say(FAIL, "err");
+          console.error(err);
+        } finally {
+          busy(false);
+        }
+      }
+
+      form.addEventListener("submit", async (e) => {
+        e.preventDefault();
+        const t = msg.value.trim();
+        if (!t) return;
+        msg.value = "";
+        await ask(t);
+      });
+
+      const readFile = (f) => new Promise((ok, no) => {
+        const r = new FileReader();
+        r.onload = () => ok(String(r.result));
+        r.onerror = () => no(r.error);
+        r.readAsDataURL(f);
+      });
+
+      photo.addEventListener("change", async () => {
+        const file = photo.files?.[0];
+        if (!file) return;
+        photo.value = "";
+        busy(true);
+        const pending = say("📷 看照片中…", "me");
+        try {
+          await unlockAudio();
+          const res = await fetch("/api/analyze-food", {
+            method: "POST",
+            headers: { "Content-Type": "text/plain" },
+            body: await readFile(file),
+          });
+          const data = await res.json().catch(() => ({}));
+          if (!res.ok || !data.description) throw new Error(data.error ?? res.statusText);
+          pending.remove();
+          if (data.description.includes(NO_FOOD)) { say(PHOTO_FAIL); return; }
+          busy(false);
+          await ask(`我剛吃了:${data.description}`, `📷 ${data.description}`);
+        } catch (err) {
+          pending.remove();
+          say(PHOTO_FAIL, "err");
+          console.error(err);
+        } finally {
+          busy(false);
+        }
+      });
+
+      // ── presenter boot ──────────────────────────────────────────────────
+      presenter.addEventListener("PRESENTER_STATUS", (e) => {
+        if (e.detail?.status !== "Ready") return;
+        $("loading")?.remove();
+        say(GREETING);
+      });
+
+      async function start() {
+        try {
+          const cfg = await (await fetch("/api/config")).json();
+          // This page runs its own avatar and voice; /api/kid/config merges
+          // the KID_* pins over whatever the shared configuration resolved.
+          const kid = await (await fetch("/api/kid/config")).json();
+          const target = kid.fixedTarget ?? cfg.fixedTarget;
+          if (!target) throw new Error("no presenter target");
+          await new Promise((ok, no) => {
+            const s = Object.assign(document.createElement("script"), {
+              type: "module", src: cfg.presenterUrl, onload: ok,
+              onerror: () => no(new Error("presenter failed to load")),
+            });
+            document.head.append(s);
+          });
+          const { connect_key } = await (await fetch("/api/connect-key")).json();
+          await presenter.initializeWithConnectKey(connect_key, target);
+          config = cfg;
+        } catch (err) {
+          $("loading")?.remove();
+          const box = $("stage-error");
+          box.textContent = "大福現在有點忙,等一下再來找他。";
+          box.hidden = false;
+          console.error(err);
+        }
+      }
+
+      start();
+    </script>
+  </body>
+</html>
