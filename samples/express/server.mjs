@@ -1084,6 +1084,81 @@ app.post("/api/chat", async (req, res) => {
   }
 });
 
+// ── Food photo recognition (Gemini vision) ─────────────────────────────────
+// The browser posts a data URL as text/plain, not JSON: the global
+// express.json() above caps bodies at 100 KB, and any food photo blows past
+// that. text/plain is not a type express.json() claims, so it passes straight
+// through to this handler, which reads the raw stream itself.
+const FOOD_PROMPT =
+  "辨識這張照片裡的食物。只用繁體中文回答一行,列出看到的食物與估計份量,用頓號分隔," +
+  "不要加任何說明文字。例如:排骨便當一個、珍珠奶茶大杯一杯。" +
+  "如果照片裡沒有食物,只回答:沒有看到食物。";
+const FOOD_MAX_BYTES = 8 * 1024 * 1024;
+
+app.post("/api/analyze-food", async (req, res) => {
+  const key = process.env.GEMINI_API_KEY;
+  if (!key) {
+    res.status(501).json({ error: "GEMINI_API_KEY not configured" });
+    return;
+  }
+  try {
+    let raw = "";
+    for await (const chunk of req) {
+      raw += chunk;
+      if (raw.length > FOOD_MAX_BYTES) {
+        res.status(413).json({ error: "image too large" });
+        req.destroy();
+        return;
+      }
+    }
+    const match = /^data:(image\/[a-z+.-]+);base64,(.+)$/is.exec(raw.trim());
+    if (!match) {
+      res.status(400).json({ error: "expected an image data URL" });
+      return;
+    }
+    const [, mimeType, data] = match;
+    const model = process.env.GEMINI_MODEL || "gemini-2.0-flash";
+    // Auth goes in the x-goog-api-key header, not the ?key= query parameter:
+    // AI Studio now issues "AQ."-prefixed keys, which the query-parameter
+    // form rejects. The header form accepts both old and new key formats.
+    const upstream = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "x-goog-api-key": key },
+        body: JSON.stringify({
+          contents: [
+            {
+              parts: [
+                { text: FOOD_PROMPT },
+                { inline_data: { mime_type: mimeType, data } },
+              ],
+            },
+          ],
+        }),
+      },
+    );
+    const payload = await upstream.json().catch(() => ({}));
+    if (!upstream.ok) {
+      console.error(
+        `POST /api/analyze-food → ${upstream.status}: ` +
+          JSON.stringify(payload).slice(0, 300),
+      );
+      res.status(502).json({ error: "vision upstream error" });
+      return;
+    }
+    const description =
+      payload?.candidates?.[0]?.content?.parts?.[0]?.text?.trim();
+    if (!description) {
+      res.status(502).json({ error: "no result from vision model" });
+      return;
+    }
+    res.json({ description });
+  } catch (err) {
+    console.error(`POST /api/analyze-food → ${err}`);
+    res.status(502).json({ error: String(err) });
+  }
+});
 // ── Start ──────────────────────────────────────────────────────────────────
 
 const CHECK_ICONS = { reachable: "✓", unreachable: "✗", mock: "–" };
