@@ -1159,6 +1159,34 @@ app.post("/api/analyze-food", async (req, res) => {
     res.status(502).json({ error: String(err) });
   }
 });
+// ── Family (private-ish) chat ──────────────────────────────────────────────
+// A second chatbot for one household. The id lives here rather than in the
+// page, so it is not sitting in the browser's view-source — but note the
+// stock /api/chatbots/:id/chat route is unauthenticated, and this route adds
+// no gate of its own. Anyone who finds the URL can talk to it. That is a
+// deliberate, temporary choice: add a passcode check here before this page
+// is shared with anyone outside the household.
+const FAMILY_CHATBOT_ID = process.env.FAMILY_CHATBOT_ID ?? "";
+
+app.post(
+  "/api/family/chat",
+  route(async (req, res) => {
+    if (!FAMILY_CHATBOT_ID) {
+      res.status(501).json({ error: "FAMILY_CHATBOT_ID not configured" });
+      return;
+    }
+    const messages = req.body?.messages;
+    const invalid = chatPayloadError(messages);
+    if (invalid) {
+      res.status(400).json({ error: invalid });
+      return;
+    }
+    res.json(
+      await api.chatWithChatbot(FAMILY_CHATBOT_ID, messages, CONNECT_SECRET_KEY),
+    );
+  }),
+);
+
 // ── Start ──────────────────────────────────────────────────────────────────
 
 const CHECK_ICONS = { reachable: "✓", unreachable: "✗", mock: "–" };
