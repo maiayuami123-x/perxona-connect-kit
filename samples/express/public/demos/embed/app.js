@@ -1,11 +1,17 @@
 /**
- * Perxona Connect Kit — Embed Demo
+ * Perxona Connect Kit — Embed Demo (小菇 · 飲食夥伴)
  *
  * An avatar answering questions on a page that already exists. Everything it
  * needs arrives resolved from GET /api/config; failures go to the console,
  * never the page — except a subscription issue (codes 1003 and 14005), a
  * fixed, non-technical sentence the visitor can act on. See README.md.
  * Zero dependencies — plain ESM, no build step required.
+ *
+ * Added on top of the stock demo: a food-photo path. The photo goes to
+ * /api/analyze-food, which only NAMES the food; the description it returns is
+ * then sent through the ordinary chatbot turn, so the nutrition answer still
+ * comes from the chatbot's own persona and knowledge file rather than from the
+ * vision model. One brain, one voice.
  */
 
 /** @type {HTMLElement & import('@perxona/presenter-types').IPresentationWidget} */
@@ -16,6 +22,8 @@ const chatForm = document.querySelector("#chat-form");
 const chatInput = document.querySelector("#chat-input");
 /** @type {HTMLButtonElement} */
 const sendBtn = document.querySelector("#send-btn");
+/** @type {HTMLInputElement} */
+const photoInput = document.querySelector("#photo-input");
 const chatLog = document.getElementById("chat-log");
 const chatPanel = document.getElementById("chat");
 
@@ -23,13 +31,16 @@ const chatPanel = document.getElementById("chat");
 /** @type {{role: "user"|"assistant", text: string}[]} */
 const history = [];
 const MAX_HISTORY_TURNS = 20; // 10 user + 10 assistant
-const GREETING = "哈囉,我是小菇。跟我說你今天吃了什麼,我幫你算熱量、給建議。";
-const FAILURE_REPLY = "Sorry — I couldn't reach the assistant just then.";
+const GREETING =
+  "哈囉,我是小菇。跟我說你今天吃了什麼,或直接拍張照片,我幫你算熱量、給建議。";
+const FAILURE_REPLY = "抱歉,我剛剛沒連上,再試一次好嗎?";
+const PHOTO_FAILURE_REPLY = "這張照片我看不出來吃了什麼,你直接打字告訴我吧。";
+const NO_FOOD_MARKER = "沒有看到食物";
 // Shown in #stage-error when start() rejects, whatever the cause — the
 // actual reason (bad config, unreachable presenter engine, no chatbot yet)
 // only ever reaches console.error. See README.md "Where the errors went".
 const PRESENTER_UNAVAILABLE_REPLY =
-  "This assistant isn't available right now. Please check back soon.";
+  "小菇現在有點忙,請稍後再回來看看。";
 const toConnectMessages = (turns) =>
   turns.map(({ role, text }) => ({ role, parts: [{ type: "text", text }] }));
 let audioUnlocked = false;
@@ -74,8 +85,8 @@ const NO_SUBSCRIPTION_CODE = 14005;
 const isSubscriptionIssue = (code) =>
   code === CREDIT_EXHAUSTED_CODE || code === NO_SUBSCRIPTION_CODE;
 const subscriptionIssueReply = () =>
-  "Your organization's credits are used up or its subscription needs " +
-  `attention. Check your usage at ${config?.subscriptionUrl}`;
+  "這個帳號的額度用完了,或訂閱需要處理一下。" +
+  `可以到 ${config?.subscriptionUrl} 查看用量。`;
 
 function appendMessage(role, text) {
   const li = document.createElement("li");
@@ -83,6 +94,13 @@ function appendMessage(role, text) {
   li.textContent = text;
   chatLog.append(li);
   chatLog.scrollTop = chatLog.scrollHeight;
+  return li;
+}
+
+function setBusy(busy) {
+  sendBtn.disabled = busy;
+  chatInput.disabled = busy;
+  if (photoInput) photoInput.disabled = busy;
 }
 
 async function loadPresenterEngine(url) {
@@ -99,34 +117,28 @@ async function loadPresenterEngine(url) {
   });
 }
 
-// Attach before initializing: Ready is only ever an event, never readable state.
-presenter.addEventListener("PRESENTER_STATUS", (/** @type {any} */ event) => {
-  if (event.detail?.status !== "Ready") return;
-  document.getElementById("stage-loading")?.remove();
-  chatPanel.hidden = false;
-  appendMessage("assistant", GREETING); // written, not spoken — no gesture yet
-});
+// present() returns AUDIO_CONTEXT_UNAVAILABLE until this has run, and autoplay
+// policy allows it only from a user action — a submit or a file pick is one.
+async function unlockAudio() {
+  if (audioUnlocked) return;
+  await presenter.resumeAudioPlayback?.();
+  audioUnlocked = true;
+}
 
-chatForm.addEventListener("submit", async (event) => {
-  event.preventDefault();
-  const text = chatInput.value.trim();
-  if (!text || !config?.chatbotId) return;
-
-  chatInput.value = "";
-  appendMessage("user", text);
+/**
+ * One chatbot turn: `text` is what the chatbot receives; `shown` is what the
+ * visitor sees in their own bubble (they differ for a photo, where the bubble
+ * shows the recognised food and the chatbot gets a sentence around it).
+ */
+async function askChatbot(text, shown = text) {
+  if (!config?.chatbotId) return;
+  appendMessage("user", shown);
   history.push({ role: "user", text });
-  sendBtn.disabled = true;
-  chatInput.disabled = true;
+  setBusy(true);
   presenter.setThinking?.(true);
 
   try {
-    // present() returns AUDIO_CONTEXT_UNAVAILABLE until this has run, and
-    // autoplay policy allows it only from a user action — this submit is one.
-    if (!audioUnlocked) {
-      await presenter.resumeAudioPlayback?.();
-      audioUnlocked = true;
-    }
-
+    await unlockAudio();
     const { reply_text: reply, status } = await request(
       `/api/chatbots/${config.chatbotId}/chat`,
       { messages: toConnectMessages(history.slice(-MAX_HISTORY_TURNS)) },
@@ -148,10 +160,7 @@ chatForm.addEventListener("submit", async (event) => {
     presenter.setThinking?.(false);
     // The page may not show configuration; it may say something went wrong.
     // A subscription issue is the one exception carved out above — its reply
-    // is a fixed string, never err.data.details (which echoes the org id
-    // back). Requires subscriptionUrl too: config is {} when start() threw
-    // (e.g. no chatbot yet), and the reply would otherwise read "Check your
-    // usage at undefined" instead of falling back.
+    // is a fixed string, never err.data.details (which echoes the org id back).
     const subscriptionIssue =
       isSubscriptionIssue(err.data?.code) && config?.subscriptionUrl;
     appendMessage(
@@ -164,9 +173,69 @@ chatForm.addEventListener("submit", async (event) => {
         : `Embed: ${err.message}`,
     );
   } finally {
-    sendBtn.disabled = false;
-    chatInput.disabled = false;
+    setBusy(false);
     chatInput.focus();
+  }
+}
+
+const readAsDataUrl = (file) =>
+  new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result));
+    reader.onerror = () => reject(reader.error ?? new Error("read failed"));
+    reader.readAsDataURL(file);
+  });
+
+// Attach before initializing: Ready is only ever an event, never readable state.
+presenter.addEventListener("PRESENTER_STATUS", (/** @type {any} */ event) => {
+  if (event.detail?.status !== "Ready") return;
+  document.getElementById("stage-loading")?.remove();
+  chatPanel.hidden = false;
+  appendMessage("assistant", GREETING); // written, not spoken — no gesture yet
+});
+
+chatForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const text = chatInput.value.trim();
+  if (!text) return;
+  chatInput.value = "";
+  await askChatbot(text);
+});
+
+photoInput?.addEventListener("change", async () => {
+  const file = photoInput.files?.[0];
+  if (!file) return;
+  // Clear immediately so picking the same file twice fires change again.
+  photoInput.value = "";
+
+  setBusy(true);
+  const pending = appendMessage("user", "📷 分析照片中…");
+  try {
+    // The pick itself is the gesture; unlock now rather than after the wait.
+    await unlockAudio();
+    const dataUrl = await readAsDataUrl(file);
+    const res = await fetch("/api/analyze-food", {
+      method: "POST",
+      headers: { "Content-Type": "text/plain" },
+      body: dataUrl,
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data.description) throw new Error(data.error ?? res.statusText);
+
+    pending.remove();
+    if (data.description.includes(NO_FOOD_MARKER)) {
+      appendMessage("assistant", PHOTO_FAILURE_REPLY);
+      return;
+    }
+    setBusy(false);
+    // The vision model only names the food; the chatbot does the nutrition.
+    await askChatbot(`我剛吃了:${data.description}`, `📷 ${data.description}`);
+  } catch (err) {
+    pending.remove();
+    appendMessage("error", PHOTO_FAILURE_REPLY);
+    console.error(`Embed: analyze-food — ${err.message}`);
+  } finally {
+    setBusy(false);
   }
 });
 
