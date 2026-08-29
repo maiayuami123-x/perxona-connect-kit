@@ -1,10 +1,52 @@
 <!doctype html>
-<html lang="en">
+<html lang="zh-Hant">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Embed | Perxona Connect Kit</title>
     <link rel="stylesheet" href="style.css" />
+    <style>
+      /* The stock stylesheet has no photo control; this is the whole addition.
+         A styled <label> rather than a <button>, so one click opens the file
+         picker with no JS wiring, and the real <input type="file"> stays in
+         the DOM (hidden, not display:none) for assistive tech. */
+      .photo-btn {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        flex: none;
+        width: 2.5rem;
+        height: 2.5rem;
+        margin-right: 0.4rem;
+        border: 1px solid #3a3a44;
+        border-radius: 0.5rem;
+        background: #23232b;
+        color: #e8e8ef;
+        font-size: 1.1rem;
+        line-height: 1;
+        cursor: pointer;
+        user-select: none;
+      }
+      .photo-btn:hover {
+        background: #2e2e38;
+      }
+      .photo-btn:focus-within {
+        outline: 2px solid #7b7bff;
+        outline-offset: 2px;
+      }
+      .photo-input {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        opacity: 0;
+        pointer-events: none;
+      }
+      .photo-input:disabled + .photo-btn,
+      .photo-btn:has(.photo-input:disabled) {
+        opacity: 0.5;
+        cursor: default;
+      }
+    </style>
   </head>
   <body>
     <!-- Deliberately shaped like a real product page, not a control panel:
@@ -70,16 +112,27 @@
 
         <!-- Hidden until PRESENTER_STATUS reports Ready. There is no separate
              "enable audio" control: autoplay policy needs a user gesture, and
-             sending the first message is one — see app.js. -->
+             sending the first message — or picking a photo — is one. -->
         <div id="chat" class="chat" hidden>
           <ul id="chat-log" class="chat-log"></ul>
           <form id="chat-form" class="chat-form">
+            <label class="photo-btn" title="拍照或上傳食物照片">
+              <span aria-hidden="true">📷</span>
+              <input
+                id="photo-input"
+                class="photo-input"
+                type="file"
+                accept="image/*"
+                capture="environment"
+                aria-label="上傳食物照片"
+              />
+            </label>
             <input
               id="chat-input"
               class="chat-input"
               type="text"
               autocomplete="off"
-              placeholder="例如:我午餐吃了排骨便當配珍奶…"
+              placeholder="例如:我午餐吃了排骨便當配珍奶"
               aria-label="Message"
             />
             <button id="send-btn" class="send-btn" type="submit">Send</button>
