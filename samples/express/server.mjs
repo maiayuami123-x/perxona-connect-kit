@@ -1241,6 +1241,217 @@ app.post(
     );
   }),
 );
+// ── Adult coach (no avatar) ────────────────────────────────────────────────
+// A second, avatar-free product on the same server. Where the Embed/Family
+// pages hand a reply to Perxona's presenter to speak, this one talks to
+// Gemini directly and returns structured data the page can total up.
+//
+// Two reasons it does not reuse the Connect chatbot:
+//   1. The knowledge base lives in git here, not in a Studio upload, so a
+//      change is a commit instead of a manual re-upload.
+//   2. Targets are per-user and computed per request. A Connect chatbot's
+//      instructions are fixed per chatbot, so a shared one cannot hold
+//      "your target is 2,340 kcal" for every visitor.
+//
+// The food table is ~5 KB — small enough to inline whole on every call, which
+// is both cheaper to reason about and more reliable than retrieval: nothing
+// gets chunked away mid-row.
+import { readFileSync } from "node:fs";
+
+const FOOD_TABLE = (() => {
+  try {
+    return readFileSync(new URL("./data/knowledge-food.txt", import.meta.url), "utf8");
+  } catch {
+    console.error("WARNING: data/knowledge-food.txt missing — /api/coach will 501");
+    return "";
+  }
+})();
+
+const ACTIVITY = { sedentary: 1.2, light: 1.375, moderate: 1.55, active: 1.725 };
+const GOALS = {
+  maintain: { label: "維持", kcal: 0, proteinPerKg: 1.2 },
+  cut: { label: "減脂", kcal: -400, proteinPerKg: 1.8 },
+  bulk: { label: "增肌", kcal: +300, proteinPerKg: 1.8 },
+};
+
+/**
+ * Mifflin-St Jeor, the formula with the best track record for non-athletes.
+ * Returns whole numbers because a target of "2,337.4 kcal" implies a precision
+ * that food estimates do not have.
+ */
+function computeTargets(p) {
+  const age = Number(p?.age), h = Number(p?.height), w = Number(p?.weight);
+  if (!(age > 0 && h > 0 && w > 0)) return null;
+  const male = p?.sex !== "female";
+  const bmr = 10 * w + 6.25 * h - 5 * age + (male ? 5 : -161);
+  const tdee = bmr * (ACTIVITY[p?.activity] ?? ACTIVITY.light);
+  const goal = GOALS[p?.goal] ?? GOALS.maintain;
+
+  // Never prescribe below 1,500 kcal for an adult man (1,200 for a woman):
+  // a deficit that deep costs muscle and adherence, and this tool has no
+  // clinician behind it. The floor silently shrinks the deficit instead.
+  const floor = male ? 1500 : 1200;
+  const kcal = Math.max(Math.round(tdee + goal.kcal), floor);
+
+  const protein = Math.round(w * goal.proteinPerKg);
+  const fat = Math.round((kcal * 0.25) / 9);
+  const carb = Math.round((kcal - protein * 4 - fat * 9) / 4);
+  return {
+    bmr: Math.round(bmr),
+    tdee: Math.round(tdee),
+    goal: goal.label,
+    kcal,
+    protein,
+    fat,
+    satFat: Math.round((kcal * 0.1) / 9),
+    carb,
+    sugar: Math.round((kcal * 0.1) / 4),
+    fiber: 30,
+    sodium: 2400,
+  };
+}
+
+app.post("/api/targets", (req, res) => {
+  const targets = computeTargets(req.body?.profile);
+  if (!targets) {
+    res.status(400).json({ error: "profile needs age, height and weight" });
+    return;
+  }
+  res.json({ targets });
+});
+
+const COACH_SCHEMA = {
+  type: "object",
+  properties: {
+    reply: { type: "string" },
+    items: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: {
+          name: { type: "string" },
+          kcal: { type: "number" },
+          protein: { type: "number" },
+          fat: { type: "number" },
+          carb: { type: "number" },
+          sugar: { type: "number" },
+          fiber: { type: "number" },
+          sodium: { type: "number" },
+        },
+        required: ["name", "kcal", "protein", "fat", "carb", "sugar", "fiber", "sodium"],
+      },
+    },
+  },
+  required: ["reply", "items"],
+};
+
+function systemPrompt(targets, consumed) {
+  const left = (k) => Math.max(0, targets[k] - (Number(consumed?.[k]) || 0));
+  return `你是一位務實的營養師,正在協助一位成年男性記錄飲食。使用繁體中文,台灣口語。
+
+【這位使用者今天的目標】
+熱量 ${targets.kcal} 大卡(BMR ${targets.bmr},TDEE ${targets.tdee},目標:${targets.goal})
+蛋白質 ${targets.protein} 公克、脂肪 ${targets.fat} 公克(其中飽和脂肪上限 ${targets.satFat} 公克)
+碳水 ${targets.carb} 公克、糖上限 ${targets.sugar} 公克、膳食纖維 ${targets.fiber} 公克、鈉上限 ${targets.sodium} 毫克
+
+【他今天已經吃掉】
+熱量 ${Number(consumed?.kcal) || 0} 大卡、蛋白質 ${Number(consumed?.protein) || 0} 公克、鈉 ${Number(consumed?.sodium) || 0} 毫克
+剩餘額度:熱量 ${left("kcal")} 大卡、蛋白質還需 ${left("protein")} 公克
+
+【回覆規則】
+一、這是看文字的介面,不是語音。可以用條列、可以給數字、可以列表格,不用擔心長度,
+    但仍然以講重點為優先,控制在 200 字內。
+二、先給這一餐的總熱量,再點出一到兩個最該注意的項目,最後給一句下一餐的具體建議。
+三、判斷該講哪一項:看哪一項佔今日目標的比例最高,或哪一項明顯落後。
+    蛋白質不足要主動提,這是男性外食族最常見的缺口。
+四、份量不明確時先問清楚再估,寧可高估不可低估。使用者說「一個」「一份」就以整份計算,
+    不可自行縮小。成年男性的實際食量通常比表列份量多兩到五成。
+五、不要說教,不要讓使用者有罪惡感。絕不建議用禁食、只喝水或跳過下一餐來補償吃多的一餐。
+六、遇到疾病、用藥、極端節食或體重相關的強烈負面情緒,建議諮詢醫師或營養師,
+    不要自行給處方式建議。
+
+【輸出格式】
+回傳 JSON,兩個欄位:
+reply — 給使用者看的文字。
+items — 這次「實際吃下去」的食物,每項含 name 與七項營養數值(kcal、protein、fat、
+        carb、sugar、fiber、sodium,單位為大卡/公克/毫克)。
+        這個陣列會被用來累計今日攝取,所以:
+        只有使用者確實吃了的東西才放進去。
+        使用者只是詢問、假設、或你在建議他吃什麼,items 一律回空陣列。
+        同一餐的多樣食物分開列,不要合併成一筆。
+
+【食物營養參考資料】
+${FOOD_TABLE}`;
+}
+
+app.post("/api/coach", async (req, res) => {
+  const key = process.env.GEMINI_API_KEY;
+  if (!key || !FOOD_TABLE) {
+    res.status(501).json({ error: "coach not configured" });
+    return;
+  }
+  const targets = computeTargets(req.body?.profile);
+  if (!targets) {
+    res.status(400).json({ error: "profile needs age, height and weight" });
+    return;
+  }
+  const messages = req.body?.messages;
+  const invalid = chatPayloadError(messages);
+  if (invalid) {
+    res.status(400).json({ error: invalid });
+    return;
+  }
+
+  const model = process.env.GEMINI_MODEL || "gemini-3.6-flash";
+  try {
+    const upstream = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "x-goog-api-key": key },
+        body: JSON.stringify({
+          systemInstruction: {
+            parts: [{ text: systemPrompt(targets, req.body?.consumed) }],
+          },
+          contents: messages.map((m) => ({
+            role: m.role === "assistant" ? "model" : "user",
+            parts: [{ text: String(m.text ?? "") }],
+          })),
+          generationConfig: {
+            responseMimeType: "application/json",
+            responseSchema: COACH_SCHEMA,
+            temperature: 0.4,
+          },
+        }),
+      },
+    );
+    const payload = await upstream.json().catch(() => ({}));
+    if (!upstream.ok) {
+      console.error(
+        `POST /api/coach → ${upstream.status}: ${JSON.stringify(payload).slice(0, 300)}`,
+      );
+      res.status(502).json({ error: "coach upstream error" });
+      return;
+    }
+    const raw = payload?.candidates?.[0]?.content?.parts?.[0]?.text;
+    let parsed;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      console.error(`POST /api/coach → unparseable reply: ${String(raw).slice(0, 200)}`);
+      res.status(502).json({ error: "coach returned malformed data" });
+      return;
+    }
+    res.json({
+      reply: String(parsed.reply ?? ""),
+      items: Array.isArray(parsed.items) ? parsed.items : [],
+      targets,
+    });
+  } catch (err) {
+    console.error(`POST /api/coach → ${err}`);
+    res.status(502).json({ error: String(err) });
+  }
+});
 
 // ── Start ──────────────────────────────────────────────────────────────────
 
